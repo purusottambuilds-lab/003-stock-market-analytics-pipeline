@@ -1,0 +1,313 @@
+{
+    "name": "pl_003_stock_analytics",
+    "properties": {
+        "description": "Weekday pipeline - fetches OHLCV for MSFT/AAPL/GOOGL via Alpha Vantage, incremental load, SCD Type 2 with Delta MERGE, Delta time travel",
+        "activities": [
+            {
+                "name": "IterateSymbols",
+                "type": "ForEach",
+                "dependsOn": [],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@pipeline().parameters.stock_symbols",
+                        "type": "Expression"
+                    },
+                    "batchCount": 3,
+                    "activities": [
+                        {
+                            "name": "FetchStockData",
+                            "type": "WebActivity",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 3,
+                                "retryIntervalInSeconds": 60,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "GET",
+                                "url": {
+                                    "value": "@{concat(\n  'https://www.alphavantage.co/query',\n  '?function=TIME_SERIES_DAILY',\n  '&symbol=',      item(),\n  '&apikey=',      pipeline().parameters.api_key,\n  '&outputsize=compact'\n)}\n",
+                                    "type": "Expression"
+                                }
+                            }
+                        },
+                        {
+                            "name": "SaveRawToADLS",
+                            "type": "Copy",
+                            "dependsOn": [
+                                {
+                                    "activity": "FetchStockData",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [
+                                {
+                                    "name": "folder_path",
+                                    "value": "@{concat(item(),'/',formatDateTime(utcNow(),'yyyy-MM-dd'))}"
+                                }
+                            ],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "JsonSource",
+                                    "storeSettings": {
+                                        "type": "HttpReadSettings",
+                                        "requestMethod": "GET"
+                                    },
+                                    "formatSettings": {
+                                        "type": "JsonReadSettings"
+                                    }
+                                },
+                                "sink": {
+                                    "type": "JsonSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings",
+                                        "copyBehavior": "PreserveHierarchy"
+                                    },
+                                    "formatSettings": {
+                                        "type": "JsonWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "ds_003_stock_api",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "relative_url": {
+                                            "value": "@{concat(\n  '/query',\n  '?function=TIME_SERIES_DAILY',\n  '&symbol=',      item(),\n  '&apikey=',      pipeline().parameters.api_key,\n  '&outputsize=compact'\n)}\n",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "ds_003_raw_sink",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "folder_path": {
+                                            "value": "@{concat(item(),'/',formatDateTime(utcNow(),'yyyy-MM-dd'))}",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "IngestStocks",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "IterateSymbols",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/Users/purusottam.builds@gmail.com/dir_003_stock_market/nb_01_ingest_stocks",
+                    "baseParameters": {
+                        "run_date": {
+                            "value": "@{formatDateTime(utcNow(),'yyyy-MM-dd')}",
+                            "type": "Expression"
+                        },
+                        "stock_symbols": {
+                            "value": "@{join(pipeline().parameters.stock_symbols,',')}",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "RunSCD2Transform",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "IngestStocks",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/Users/purusottam.builds@gmail.com/dir_003_stock_market/nb_02_scd2_transform",
+                    "baseParameters": {
+                        "run_date": {
+                            "value": "@{formatDateTime(utcNow(),'yyyy-MM-dd')}",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "LoadToSQL",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "RunSCD2Transform",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/Users/purusottam.builds@gmail.com/dir_003_stock_market/nb_03_load_to_sql"
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_databricks",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "SendSuccessNotification",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "LoadToSQL",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "url": {
+                        "value": "https://prod-01.centralindia.logic.azure.com:443/workflows/ec375a60de8e4ddd997e5dbf32037d01/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=3klC2JC9Fm6ljhnssRQV7LrqhqC95rLhMeFd1YgBDHw",
+                        "type": "Expression"
+                    },
+                    "body": {
+                        "value": "{\n  \"status\"   : \"SUCCESS\",\n  \"pipeline\" : \"@{pipeline().Pipeline}\",\n  \"message\"  : \"Stock Analytics pipeline completed successfully\",\n  \"runId\"    : \"@{pipeline().RunId}\"\n}\n",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "SendFailureAlert",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "IterateSymbols",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    },
+                    {
+                        "activity": "IngestStocks",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    },
+                    {
+                        "activity": "RunSCD2Transform",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    },
+                    {
+                        "activity": "LoadToSQL",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "url": {
+                        "value": "https://prod-01.centralindia.logic.azure.com:443/workflows/ec375a60de8e4ddd997e5dbf32037d01/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=3klC2JC9Fm6ljhnssRQV7LrqhqC95rLhMeFd1YgBDHw",
+                        "type": "Expression"
+                    },
+                    "body": {
+                        "value": "{\n  \"status\"   : \"FAILED\",\n  \"pipeline\" : \"@{pipeline().Pipeline}\",\n  \"message\"  : \"Stock Analytics pipeline FAILED — check ADF Monitor\",\n  \"runId\"    : \"@{pipeline().RunId}\"\n}\n",
+                        "type": "Expression"
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "stock_symbols": {
+                "type": "array",
+                "defaultValue": [
+                    "MSFT",
+                    "AAPL",
+                    "GOOGL"
+                ]
+            },
+            "api_key": {
+                "type": "string",
+                "defaultValue": "OUBL8846OJZ5G4W9"
+            },
+            "run_date": {
+                "type": "string",
+                "defaultValue": "@{formatDateTime(utcNow(),'yyyy-MM-dd')}"
+            }
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-06-02T15:41:37Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}
